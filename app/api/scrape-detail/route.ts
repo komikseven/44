@@ -19,6 +19,17 @@ function decodeHtml(text: string): string {
 }
 
 /**
+ * Buang blok menu navigasi global "top-nav-flags" dari HTML sebelum
+ * scan teks polos cari kata Manga/Manhwa/Manhua. Tanpa ini, strategi
+ * fallback (scan teks) selalu salah tangkap karena nav ini berisi
+ * ketiga kata sekaligus dan muncul di SETIAP halaman, termasuk
+ * halaman detail komik manapun.
+ */
+function stripNavFlags(html: string): string {
+  return html.replace(/<div[^>]*class="[^"]*top-nav-flags[^"]*"[^>]*>[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/i, "")
+}
+
+/**
  * Deteksi mangaType dari HTML halaman detail komik7.my.id.
  *
  * Strategi berurutan (berhenti saat dapat hasil):
@@ -43,7 +54,21 @@ function decodeHtml(text: string): string {
  *
  * 6. Fallback: "Manga" (default)
  */
-async function detectMangaType(html: string, wpPostId?: number): Promise<string> {
+async function detectMangaType(rawHtml: string, wpPostId?: number): Promise<string> {
+  // Buang nav "top-nav-flags" dulu — berisi 3 kata Manga/Manhwa/Manhua
+  // sekaligus di setiap halaman, bisa salah tertangkap strategi di bawah.
+  const html = stripNavFlags(rawHtml)
+
+  // ── Strategi 0 (PALING PRESISI — dicek PALING AWAL): blok class="imptdt" berisi "Tipe" ──
+  // Pola komik7.my.id (tema WPManga/Madara), langsung dari HTML yang user lihat di browser:
+  // <div class="imptdt">Tipe <a href="...?type=Manga">Manga</a></div>
+  // Ini paling akurat karena merefleksikan apa yang benar2 ditampilkan di halaman,
+  // dicek SEBELUM strategi WP REST API (taxonomy/category bisa salah-assign di admin
+  // dan tidak mencerminkan apa yang ditampilkan ke pengunjung).
+  const imptdtMatch = html.match(
+    /<div[^>]*class="[^"]*imptdt[^"]*"[^>]*>\s*Tipe\s*(?:<[^>]+>)*\s*(Manhua|Manhwa|Manga)/i
+  )
+  if (imptdtMatch) return imptdtMatch[1]
 
   // ── Strategi 1: WP custom taxonomy `ero_type` (madara/mangastream plugin) ──
   if (wpPostId) {
@@ -92,18 +117,27 @@ async function detectMangaType(html: string, wpPostId?: number): Promise<string>
     /<(?:dt|th)[^>]*>[^<]*(?:Type|Tipe)[^<]*<\/(?:dt|th)>\s*<(?:dd|td)[^>]*>\s*(?:<[^>]+>)*\s*(Manhua|Manhwa|Manga)/i,
     // li dengan label "Type"
     /<li[^>]*>[^<]*(?:Type|Tipe)[^<]*:\s*(?:<[^>]+>)*\s*(Manhua|Manhwa|Manga)/i,
-    // Pola tema komik7 spesifik: badge tipe di card header
-    /<span[^>]*>\s*(Manhua|Manhwa|Manga)\s*<\/span>/i,
+    // CATATAN: pattern generik <span>Manhua</span> SUDAH DIHAPUS —
+    // komik7.my.id punya menu navigasi global "top-nav-flags" di SETIAP
+    // halaman berisi <span class="flag-text">Manga</span>/Manhwa/Manhua
+    // sekaligus (3 link filter genre). Pattern generik tadi selalu
+    // menangkap "Manga" dari nav ini duluan karena render di atas,
+    // bukan dari tipe komik yang sebenarnya. Lihat Strategi 0 di atas
+    // untuk deteksi yang benar (scope ke class="imptdt").
   ]
   for (const pat of typeBlockPatterns) {
     const m = html.match(pat)
     if (m) return m[1]
   }
 
-  // ── Strategi 3: link ?type= di dalam HTML detail ──
-  // Bisa muncul di breadcrumb, related section, atau tags
-  const typeLinkMatch = html.match(/[?&](?:amp;)?type=(Manhua|Manhwa|Manga)(?:[^a-zA-Z]|$)/i)
-  if (typeLinkMatch) return typeLinkMatch[1]
+  // ── Strategi 3: link ?type= TAPI hanya di dalam blok "imptdt"/"tsinfo" ──
+  // (Strategi global lama dibuang — terlalu greedy, sering match link
+  //  navigasi/filter genre lain yang juga punya ?type= di halaman manapun)
+  const tsinfoBlock = html.match(/<div[^>]*class="[^"]*tsinfo[^"]*"[^>]*>([\s\S]{0,1000}?)<\/div>\s*<\/div>/i)
+  if (tsinfoBlock) {
+    const scopedTypeMatch = tsinfoBlock[1].match(/[?&](?:amp;)?type=(Manhua|Manhwa|Manga)/i)
+    if (scopedTypeMatch) return scopedTypeMatch[1]
+  }
 
   // ── Strategi 4: scan blok info setelah judul ──
   // Cari blok pertama setelah <h1> atau class="post-title"
@@ -299,7 +333,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const detail = await cached(
-      `komiku:detail:v5:${slug}`,
+      `komiku:detail:v7:${slug}`,
       TTL.seriesDetail,
       () => scrapeDetail(slug)
     )
